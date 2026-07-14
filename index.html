@@ -1701,7 +1701,14 @@
 <script type="module">
 // ===== Firebase 云同步（Firestore 实时数据库 + Google 登录）=====
 // 填入 Firebase 控制台生成的 firebaseConfig 后自动启用；为 null 时应用以纯本地模式运行
-const FIREBASE_CONFIG = null;
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyB1e-tm3L4pm5RWSw-2EX9EgaJq7iMWUsw",
+  authDomain: "lumen-todo.firebaseapp.com",
+  projectId: "lumen-todo",
+  storageBucket: "lumen-todo.firebasestorage.app",
+  messagingSenderId: "417476898383",
+  appId: "1:417476898383:web:7967c4e7edd85a3a2b043a"
+};
 
 if (FIREBASE_CONFIG) {
   try {
