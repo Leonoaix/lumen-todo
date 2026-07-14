@@ -410,6 +410,49 @@
   #syncMsg.err { color: var(--coral); }
   #syncMsg.ok { color: var(--teal); }
 
+  /* ---------- 入场与微交互动效 ---------- */
+  @keyframes fadeup {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: none; }
+  }
+  header.top, .composer, .toolbar, .tagrow, footer.foot {
+    animation: fadeup 0.65s cubic-bezier(.22,1,.36,1) backwards;
+  }
+  header.top { animation-delay: 0.05s; }
+  .composer { animation-delay: 0.14s; }
+  .toolbar { animation-delay: 0.22s; }
+  .tagrow { animation-delay: 0.28s; }
+  footer.foot { animation-delay: 0.42s; }
+  li.task.boot { animation: fadeup 0.55s cubic-bezier(.22,1,.36,1) backwards; }
+
+  .brand h1 { background-size: 230% 100%; animation: shimmer 10s ease-in-out infinite; }
+  @keyframes shimmer {
+    0%, 100% { background-position: 0% 0; }
+    50% { background-position: 96% 0; }
+  }
+
+  li.task.completing { animation: donecard 0.45s ease forwards; }
+  @keyframes donecard {
+    30% { transform: scale(0.985); }
+    100% { opacity: 0.35; transform: scale(0.98) translateY(3px); }
+  }
+  li.task.completing .ttitle { position: relative; }
+  li.task.completing .ttitle::after {
+    content: ""; position: absolute; left: 0; top: 58%; height: 2px; width: 0;
+    background: var(--teal); box-shadow: 0 0 8px rgba(70, 232, 210, 0.8);
+    animation: strike 0.3s ease 0.05s forwards;
+  }
+  @keyframes strike { to { width: 100%; } }
+  li.task.leaving { animation: leavecard 0.24s ease forwards; }
+  @keyframes leavecard { to { opacity: 0; transform: translateX(32px) scale(0.96); } }
+
+  .empty .glyph { display: inline-block; animation: floaty 4.5s ease-in-out infinite; }
+  @keyframes floaty { 50% { transform: translateY(-8px); } }
+
+  .ringwrap { transition: filter 0.4s; }
+  .ringwrap.full { filter: drop-shadow(0 0 12px rgba(70, 232, 210, 0.6)); }
+  .chip:active, .seg button:active { transform: scale(0.94); }
+
   @media (max-width: 560px) {
     .app { padding: 20px 12px 86px; }
     .brand h1 { font-size: 1.55rem; }
@@ -541,20 +584,14 @@
 <div class="toast" id="toast" role="status"></div>
 
 <dialog class="backup" id="syncDlg">
-  <h2>☁ 云同步设置</h2>
-  <p class="hint">连接你部署在 Render 上的同步服务后，电脑、手机就共享同一份清单，改动自动双向合并。每台设备只需填一次下面两项：</p>
-  <ol class="steps">
-    <li>服务器地址：Render 上部署好的服务网址，形如 <code>https://xxx.onrender.com</code></li>
-    <li>访问密码：部署时设置的 <code>ACCESS_KEY</code></li>
-    <li>提示：免费服务器闲置会休眠，首次同步可能需要约 1 分钟唤醒，之后就快了</li>
-  </ol>
-  <div class="exrow"><span class="exlabel">服务器</span><input type="text" id="urlInput" placeholder="https://xxx.onrender.com" autocomplete="off"></div>
-  <div class="exrow"><span class="exlabel">密码</span><input type="password" id="keyInput" placeholder="部署时设置的 ACCESS_KEY" autocomplete="off"></div>
+  <h2>☁ 云同步</h2>
+  <p class="hint">用 Google 账号登录后，任务实时同步到云端数据库。电脑、手机登录同一个账号即可自动共享同一份清单——一边修改，另一边立刻更新，无需输入任何配置。</p>
+  <p class="hint" id="authState">未登录</p>
   <p class="hint" id="syncMsg"></p>
   <div class="dacts">
-    <button class="btn" id="disconnectBtn">断开同步</button>
+    <button class="btn" id="logoutBtn" hidden>退出登录</button>
     <button class="btn" id="closeSyncBtn">关闭</button>
-    <button class="btn primary" id="connectBtn">连接</button>
+    <button class="btn primary" id="loginBtn">用 Google 登录</button>
   </div>
 </dialog>
 
@@ -588,6 +625,7 @@
   var editingId = null;
   var undoBuf = null;
   var toastTimer = null;
+  var bootRender = true;
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   var deleted = {}; // 删除墓碑 id -> 时间戳，防止同步合并时已删任务复活
@@ -610,39 +648,14 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* ---------- cloud sync: 自建 Render 后端 API ---------- */
-  var SYNC_KEY = "lumen-sync-v2";
-  var sync = { url: "", key: "", rev: 0 };
+  /* ---------- cloud sync: Firebase Firestore（实时同步） ---------- */
   var pushTimer = null;
-  var syncBusy = false;
-  var lastPullAt = 0;
+  var cloudReady = false; // 已登录且实时监听已建立
 
-  function loadSyncCfg() {
-    try {
-      var raw = localStorage.getItem(SYNC_KEY);
-      if (raw) {
-        var c = JSON.parse(raw);
-        sync.url = c.url || "";
-        sync.key = c.key || "";
-      }
-    } catch (e) { /* ignore */ }
-  }
-  function saveSyncCfg() {
-    try {
-      localStorage.setItem(SYNC_KEY, JSON.stringify({ url: sync.url, key: sync.key }));
-    } catch (e) { /* ignore */ }
-  }
   function setSyncStatus(cls, text) {
     var dot = document.querySelector("#syncStatus .dot");
     dot.className = "dot " + cls;
     document.getElementById("syncText").textContent = text;
-  }
-  function apiReq(method, body) {
-    return fetch(sync.url + "/api/data", {
-      method: method,
-      headers: { "Content-Type": "application/json", "X-Access-Key": sync.key },
-      body: body ? JSON.stringify(body) : undefined
-    });
   }
   function normalizeDoc(doc) {
     var ts = (doc.tasks || []).slice().sort(function (a, b) { return a.id < b.id ? -1 : 1; });
@@ -666,60 +679,35 @@
       return !(deleted[x.id] && deleted[x.id] >= (x.updatedAt || 0));
     });
   }
-  function pullCloud() {
-    if (!sync.url || !sync.key) return;
-    lastPullAt = Date.now();
-    setSyncStatus("busy", "同步中…（服务器休眠时唤醒约需 1 分钟）");
-    apiReq("GET")
-      .then(function (res) {
-        if (res.status === 401) { setSyncStatus("err", "访问密码错误"); return; }
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json().then(function (j) {
-          sync.rev = j.rev || 0;
-          var doc = j.doc || {};
-          var before = normalizeDoc(doc);
-          mergeDoc(doc);
-          rollover();
-          render();
-          var after = normalizeDoc({ tasks: state.tasks, deleted: deleted });
-          if (after !== before) schedulePush();
-          else setSyncStatus("ok", "已同步");
-        });
-      })
-      .catch(function () { setSyncStatus("err", "同步失败，稍后自动重试"); });
-  }
-  function pushCloud(retried) {
-    if (!sync.url || !sync.key) return;
-    if (syncBusy) { schedulePush(); return; }
-    syncBusy = true;
-    setSyncStatus("busy", "同步中…");
-    apiReq("PUT", { doc: { tasks: state.tasks, deleted: deleted }, baseRev: sync.rev })
-      .then(function (res) {
-        syncBusy = false;
-        if (res.status === 401) { setSyncStatus("err", "访问密码错误"); return; }
-        if (res.status === 409) {
-          // 远端已被另一台设备更新：合并后重推一次
-          return res.json().then(function (j) {
-            sync.rev = j.rev || 0;
-            mergeDoc(j.doc || {});
-            render();
-            if (!retried) pushCloud(true);
-            else setSyncStatus("err", "同步冲突，稍后自动重试");
-          });
-        }
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json().then(function (j) {
-          sync.rev = j.rev || 0;
-          setSyncStatus("ok", "已同步");
-        });
-      })
-      .catch(function () { syncBusy = false; setSyncStatus("err", "同步失败，稍后自动重试"); });
-  }
   function schedulePush() {
-    if (!sync.url || !sync.key) return;
+    if (!cloudReady) return;
     clearTimeout(pushTimer);
-    pushTimer = setTimeout(function () { pushCloud(false); }, 1800);
+    pushTimer = setTimeout(function () {
+      if (!cloudReady || !window.LumenFire) return;
+      setSyncStatus("busy", "同步中…");
+      window.LumenFire.save({ tasks: state.tasks, deleted: deleted, savedAt: Date.now() })
+        .then(function () { setSyncStatus("ok", "已同步 · 实时"); })
+        .catch(function () { setSyncStatus("err", "同步失败，稍后自动重试"); });
+    }, 1200);
   }
+  // 以下三个回调由页面底部的 Firebase 模块脚本调用
+  window.__lumenRemote = function (docData) {
+    var doc = docData || {};
+    var before = normalizeDoc(doc);
+    mergeDoc(doc);
+    rollover();
+    render();
+    var after = normalizeDoc({ tasks: state.tasks, deleted: deleted });
+    if (after !== before) schedulePush();
+    else setSyncStatus("ok", "已同步 · 实时");
+  };
+  window.__lumenAuth = function (user) {
+    cloudReady = !!user;
+    if (user) setSyncStatus("busy", "同步中…");
+    else setSyncStatus("off", "本地模式 · 未登录");
+    updateSyncDlg();
+  };
+  window.__lumenSyncErr = function (msg) { setSyncStatus("err", msg); };
 
   /* ---------- helpers ---------- */
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -764,6 +752,7 @@
     var C = 163.4;
     document.getElementById("ringbar").style.strokeDashoffset = (C - C * pct / 100).toFixed(1);
     document.getElementById("ringnum").textContent = pct + "%";
+    document.querySelector(".ringwrap").classList.toggle("full", pct === 100 && total > 0);
     document.getElementById("todaycount").textContent = doneToday + " / " + total;
     document.getElementById("streakval").textContent = streak() + " 天";
   }
@@ -946,6 +935,16 @@
     renderTagSuggest();
     renderStats();
     save();
+    // 首次渲染：任务卡瀑布式入场
+    if (bootRender) {
+      bootRender = false;
+      if (!reduceMotion) {
+        document.querySelectorAll("li.task").forEach(function (el, i) {
+          el.classList.add("boot");
+          el.style.animationDelay = Math.min(120 + i * 50, 520) + "ms";
+        });
+      }
+    }
   }
   function renderTags() {
     var counts = {};
@@ -1084,16 +1083,25 @@
   function toggleDone(id, el) {
     var x = findTask(id);
     if (!x) return;
+    var completing = !x.done;
     x.done = !x.done;
     x.doneAt = x.done ? new Date().toISOString() : null;
     x.updatedAt = Date.now();
-    if (x.done && el) {
+    schedulePush();
+    if (completing && el) {
       var r = el.getBoundingClientRect();
       burst(r.left + r.width / 2, r.top + r.height / 2);
     }
-    render();
-    schedulePush();
-    if (x.done) maybeCelebrate();
+    var li = el && el.closest ? el.closest("li.task") : null;
+    if (completing && li && !reduceMotion) {
+      // 先播放划线+沉降动画，再重绘列表
+      el.classList.add("done");
+      li.classList.add("completing");
+      setTimeout(function () { render(); maybeCelebrate(); }, 450);
+    } else {
+      render();
+      if (x.done) maybeCelebrate();
+    }
   }
   function maybeCelebrate() {
     var t = todayStr();
@@ -1104,15 +1112,20 @@
       showToast("🎉 今日任务全部完成！", null, null);
     }
   }
-  function deleteTask(id) {
+  function deleteTask(id, li) {
     var idx = state.tasks.findIndex(function (x) { return x.id === id; });
     if (idx === -1) return;
     undoBuf = { task: state.tasks[idx], idx: idx };
     state.tasks.splice(idx, 1);
     deleted[id] = Date.now();
     if (editingId === id) editingId = null;
-    render();
     schedulePush();
+    if (li && !reduceMotion) {
+      li.classList.add("leaving");
+      setTimeout(render, 240);
+    } else {
+      render();
+    }
     showToast("已删除「" + undoBuf.task.title.slice(0, 12) + (undoBuf.task.title.length > 12 ? "…" : "") + "」", "撤销", function () {
       if (undoBuf) {
         delete deleted[undoBuf.task.id];
@@ -1216,104 +1229,185 @@
     })();
   }
 
-  /* ---------- night sky: stars + aurora ribbons + shooting stars ---------- */
+  /* ---------- night sky: 极光幕帘 + 视差星层 + 流星 ---------- */
   var sky = document.getElementById("sky");
   var sctx = sky.getContext("2d");
-  var stars = [];
+  var AUR_SCALE = 4; // 极光在 1/4 分辨率离屏绘制，放大后自然柔化
+  var aur = document.createElement("canvas");
+  var aurCtx = aur.getContext("2d");
+  var starsFar = [], starsNear = [];
   var shot = null;
-  var nextShotAt = 0;
+  var nextShotAt = 2500;
+  var streakTex = {};
+
+  var RIBBONS = [
+    { baseY: 0.20, amp: 0.045, k: 0.016, sp: 0.00030, color: "rgba(64,226,205,",  alpha: 0.15, thick: 0.30, streaks: 22, tex: "teal" },
+    { baseY: 0.31, amp: 0.060, k: 0.011, sp: 0.00022, color: "rgba(122,110,255,", alpha: 0.12, thick: 0.36, streaks: 18, tex: "violet" },
+    { baseY: 0.11, amp: 0.035, k: 0.022, sp: 0.00042, color: "rgba(80,190,255,",  alpha: 0.09, thick: 0.24, streaks: 14, tex: "blue" }
+  ];
+  function makeStreakTex(colorPrefix) {
+    // 竖向光柱贴图：纵向两端渐隐、横向中间亮两侧暗
+    var c = document.createElement("canvas");
+    c.width = 24; c.height = 160;
+    var g = c.getContext("2d");
+    var grad = g.createLinearGradient(0, 0, 0, 160);
+    grad.addColorStop(0, colorPrefix + "0)");
+    grad.addColorStop(0.28, colorPrefix + "0.9)");
+    grad.addColorStop(1, colorPrefix + "0)");
+    g.fillStyle = grad;
+    for (var x = 0; x < 24; x++) {
+      g.globalAlpha = Math.max(0, 1 - Math.abs(x - 11.5) / 12);
+      g.fillRect(x, 0, 1, 160);
+    }
+    return c;
+  }
+  streakTex.teal = makeStreakTex("rgba(64,226,205,");
+  streakTex.violet = makeStreakTex("rgba(122,110,255,");
+  streakTex.blue = makeStreakTex("rgba(80,190,255,");
+
   function sizeSky() {
     sky.width = window.innerWidth * devicePixelRatio;
     sky.height = window.innerHeight * devicePixelRatio;
     sctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    aur.width = Math.ceil(window.innerWidth / AUR_SCALE);
+    aur.height = Math.ceil(window.innerHeight / AUR_SCALE);
     initStars();
   }
   function initStars() {
     var w = window.innerWidth, h = window.innerHeight;
-    var n = Math.min(200, Math.floor(w * h / 6500));
-    stars = [];
-    for (var i = 0; i < n; i++) {
-      stars.push({
-        x: Math.random() * w,
-        y: Math.random() * h,
-        r: 0.4 + Math.random() * 1.2,
-        base: 0.25 + Math.random() * 0.5,
-        ph: Math.random() * Math.PI * 2,
-        sp: 0.4 + Math.random() * 1.4
+    starsFar = []; starsNear = [];
+    var nf = Math.min(260, Math.floor(w * h / 5000));
+    for (var i = 0; i < nf; i++) {
+      starsFar.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: 0.3 + Math.random() * 0.7,
+        base: 0.12 + Math.random() * 0.30, tw: 0.10 + Math.random() * 0.15,
+        ph: Math.random() * Math.PI * 2, sp: 0.3 + Math.random(),
+        cold: Math.random() < 0.7
+      });
+    }
+    var nn = Math.min(70, Math.floor(w * h / 18000));
+    for (var j = 0; j < nn; j++) {
+      starsNear.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: 0.9 + Math.random() * 1.1,
+        base: 0.30 + Math.random() * 0.40, tw: 0.20 + Math.random() * 0.25,
+        ph: Math.random() * Math.PI * 2, sp: 0.3 + Math.random() * 1.2,
+        cold: Math.random() < 0.6
       });
     }
   }
-  function drawRibbon(t, baseY, amp, k, speed, color, thickness) {
-    var w = window.innerWidth;
-    sctx.beginPath();
-    var step = 26;
-    var x, y;
-    for (x = 0; x <= w + step; x += step) {
-      y = baseY + Math.sin(x * k + t * speed) * amp + Math.sin(x * k * 0.47 - t * speed * 0.6) * amp * 0.55;
-      if (x === 0) sctx.moveTo(x, y);
-      else sctx.lineTo(x, y);
-    }
-    for (x = w + step; x >= -step; x -= step) {
-      y = baseY + Math.sin(x * k + t * speed) * amp + Math.sin(x * k * 0.47 - t * speed * 0.6) * amp * 0.55 + thickness;
-      sctx.lineTo(x, y);
-    }
-    sctx.closePath();
-    var g = sctx.createLinearGradient(0, baseY - amp, 0, baseY + thickness + amp);
-    g.addColorStop(0, "rgba(0,0,0,0)");
-    g.addColorStop(0.45, color);
-    g.addColorStop(1, "rgba(0,0,0,0)");
-    sctx.fillStyle = g;
-    sctx.fill();
+  function drawAurora(t) {
+    var w = aur.width, h = aur.height;
+    aurCtx.clearRect(0, 0, w, h);
+    aurCtx.globalCompositeOperation = "lighter";
+    RIBBONS.forEach(function (r, ri) {
+      var baseY = r.baseY * h, amp = r.amp * h, thick = r.thick * h;
+      var breathe = 0.75 + 0.25 * Math.sin(t * 0.00013 + ri * 2.1);
+      function ry(x) {
+        return baseY + Math.sin(x * r.k + t * r.sp) * amp + Math.sin(x * r.k * 0.43 - t * r.sp * 0.7) * amp * 0.6;
+      }
+      // 带状主体
+      aurCtx.beginPath();
+      var step = 8, x;
+      aurCtx.moveTo(0, ry(0));
+      for (x = step; x <= w + step; x += step) aurCtx.lineTo(x, ry(x));
+      for (x = w; x >= -step; x -= step) aurCtx.lineTo(x, ry(x) + thick);
+      aurCtx.closePath();
+      var g = aurCtx.createLinearGradient(0, baseY - amp, 0, baseY + thick + amp);
+      g.addColorStop(0, r.color + "0)");
+      g.addColorStop(0.4, r.color + (r.alpha * breathe).toFixed(3) + ")");
+      g.addColorStop(1, r.color + "0)");
+      aurCtx.fillStyle = g;
+      aurCtx.fill();
+      // 幕帘光柱：横向缓慢漂移、各自呼吸明暗
+      var tex = streakTex[r.tex];
+      for (var i = 0; i < r.streaks; i++) {
+        var fx = ((i * 0.61803 + ri * 0.37) + t * r.sp * 0.05) % 1;
+        if (fx < 0) fx += 1;
+        var sx = fx * w;
+        var sy = ry(sx) - thick * 0.15;
+        var a = breathe * (0.5 + 0.5 * Math.sin(t * 0.0008 + i * 1.7 + ri * 3.3));
+        if (a <= 0.03) continue;
+        aurCtx.globalAlpha = Math.min(a * r.alpha * 2.6, 0.5);
+        var sw = w * 0.02 + (i % 3) * w * 0.008;
+        aurCtx.drawImage(tex, sx - sw / 2, sy, sw, thick * 1.5);
+      }
+      aurCtx.globalAlpha = 1;
+    });
+    aurCtx.globalCompositeOperation = "source-over";
+  }
+  function drawStarLayer(list, t, offset, glint) {
+    var h = window.innerHeight;
+    list.forEach(function (s) {
+      var a = s.base + Math.sin(t * 0.001 * s.sp + s.ph) * s.tw;
+      if (a <= 0.02) return;
+      var y = ((s.y - offset) % h + h) % h;
+      sctx.globalAlpha = Math.min(Math.max(a, 0), 1);
+      sctx.fillStyle = s.cold ? "#CFE3FF" : "#FFF2DC";
+      sctx.beginPath();
+      sctx.arc(s.x, y, s.r, 0, Math.PI * 2);
+      sctx.fill();
+      // 亮星在闪烁峰值时展开十字星芒
+      if (glint && a > 0.62) {
+        var L = s.r * 5;
+        sctx.globalAlpha = Math.min((a - 0.62) * 2, 0.7);
+        sctx.strokeStyle = "#EAF6FF";
+        sctx.lineWidth = 0.7;
+        sctx.beginPath();
+        sctx.moveTo(s.x - L, y); sctx.lineTo(s.x + L, y);
+        sctx.moveTo(s.x, y - L); sctx.lineTo(s.x, y + L);
+        sctx.stroke();
+      }
+    });
+    sctx.globalAlpha = 1;
   }
   function drawSky(t) {
     var w = window.innerWidth, h = window.innerHeight;
     sctx.clearRect(0, 0, w, h);
-    sctx.globalCompositeOperation = "lighter";
-    // 极光带
-    drawRibbon(t, h * 0.16, 26, 0.010, 0.00045, "rgba(70, 232, 210, 0.10)", 130);
-    drawRibbon(t, h * 0.26, 34, 0.007, 0.00032, "rgba(139, 125, 255, 0.09)", 170);
-    drawRibbon(t, h * 0.09, 20, 0.013, 0.00058, "rgba(70, 200, 255, 0.06)", 100);
-    // 星星
-    sctx.globalCompositeOperation = "source-over";
-    stars.forEach(function (s) {
-      var a = s.base + Math.sin(t * 0.001 * s.sp + s.ph) * 0.25;
-      if (a <= 0.02) return;
-      sctx.globalAlpha = Math.min(Math.max(a, 0), 1);
-      sctx.fillStyle = "#CFE3FF";
-      sctx.beginPath();
-      sctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      sctx.fill();
-    });
-    sctx.globalAlpha = 1;
-    // 流星
+    drawAurora(t);
+    sctx.drawImage(aur, 0, 0, w, h);
+    // 星层随页面滚动产生视差
+    var sc = window.scrollY || 0;
+    drawStarLayer(starsFar, t, sc * 0.05, false);
+    drawStarLayer(starsNear, t, sc * 0.12, true);
+    // 流星：发光头部 + 渐细尾迹
     if (!shot && t > nextShotAt) {
       shot = {
         x: w * (0.15 + Math.random() * 0.7),
-        y: h * (0.05 + Math.random() * 0.25),
+        y: h * (0.04 + Math.random() * 0.22),
         vx: 6 + Math.random() * 5,
         vy: 2.5 + Math.random() * 2,
+        tail: 15,
         life: 1
       };
-      if (Math.random() < 0.5) { shot.vx = -shot.vx; }
+      if (Math.random() < 0.5) shot.vx = -shot.vx;
     }
     if (shot) {
-      var tail = 16;
-      var g2 = sctx.createLinearGradient(shot.x, shot.y, shot.x - shot.vx * tail, shot.y - shot.vy * tail);
-      g2.addColorStop(0, "rgba(230, 245, 255," + (0.85 * shot.life) + ")");
-      g2.addColorStop(1, "rgba(230, 245, 255, 0)");
-      sctx.strokeStyle = g2;
-      sctx.lineWidth = 1.6;
-      sctx.lineCap = "round";
+      var hg = sctx.createRadialGradient(shot.x, shot.y, 0, shot.x, shot.y, 7);
+      hg.addColorStop(0, "rgba(255,255,255," + (0.9 * shot.life).toFixed(3) + ")");
+      hg.addColorStop(1, "rgba(160,220,255,0)");
+      sctx.fillStyle = hg;
       sctx.beginPath();
-      sctx.moveTo(shot.x, shot.y);
-      sctx.lineTo(shot.x - shot.vx * tail, shot.y - shot.vy * tail);
-      sctx.stroke();
+      sctx.arc(shot.x, shot.y, 7, 0, Math.PI * 2);
+      sctx.fill();
+      sctx.lineCap = "round";
+      var segs = 12;
+      for (var i = 0; i < segs; i++) {
+        var f0 = i / segs, f1 = (i + 1) / segs;
+        sctx.strokeStyle = "rgba(200,235,255," + (0.7 * shot.life * (1 - f0)).toFixed(3) + ")";
+        sctx.lineWidth = 2.2 * (1 - f0) + 0.2;
+        sctx.beginPath();
+        sctx.moveTo(shot.x - shot.vx * shot.tail * f0, shot.y - shot.vy * shot.tail * f0);
+        sctx.lineTo(shot.x - shot.vx * shot.tail * f1, shot.y - shot.vy * shot.tail * f1);
+        sctx.stroke();
+      }
       shot.x += shot.vx;
       shot.y += shot.vy;
-      shot.life -= 0.022;
-      if (shot.life <= 0 || shot.x < -200 || shot.x > w + 200 || shot.y > h + 100) {
+      shot.life -= 0.02;
+      if (shot.life <= 0 || shot.x < -250 || shot.x > w + 250 || shot.y > h + 120) {
         shot = null;
-        nextShotAt = t + 4000 + Math.random() * 7000;
+        nextShotAt = t + 5000 + Math.random() * 8000;
       }
     }
   }
@@ -1432,7 +1526,7 @@
     var etagEl = e.target.closest("[data-etag]");
     var id = li.dataset.id;
     if (act === "toggle") toggleDone(id, actEl);
-    else if (act === "del") deleteTask(id);
+    else if (act === "del") deleteTask(id, li);
     else if (act === "edit") { editingId = id; render(); var f = document.querySelector('li[data-id="' + id + '"] .e-title'); if (f) f.focus(); }
     else if (act === "cancel") { editingId = null; render(); }
     else if (act === "save") saveEdit(li);
@@ -1529,36 +1623,29 @@
     m.textContent = text || "";
     m.className = "hint " + (cls || "");
   }
+  function updateSyncDlg() {
+    var user = window.LumenFire && window.LumenFire.user;
+    var configured = !!window.LumenFire;
+    document.getElementById("authState").textContent = user
+      ? "已登录：" + (user.email || user.displayName || "Google 账号")
+      : (configured ? "未登录" : "同步服务尚未配置完成，暂时只能本地使用");
+    document.getElementById("loginBtn").hidden = !!user;
+    document.getElementById("logoutBtn").hidden = !user;
+  }
   document.getElementById("syncBtn").addEventListener("click", function () {
-    document.getElementById("urlInput").value = sync.url;
-    document.getElementById("keyInput").value = sync.key;
-    syncMsg(sync.url && sync.key ? "当前已连接：" + sync.url : "");
+    syncMsg("");
+    updateSyncDlg();
     syncDlg.showModal();
   });
   document.getElementById("closeSyncBtn").addEventListener("click", function () { syncDlg.close(); });
-  document.getElementById("disconnectBtn").addEventListener("click", function () {
-    sync.url = ""; sync.key = ""; sync.rev = 0;
-    saveSyncCfg();
-    setSyncStatus("off", "本地模式 · 未开启云同步");
-    syncMsg("已断开，数据仅保留在本设备", "ok");
+  document.getElementById("loginBtn").addEventListener("click", function () {
+    if (!window.LumenFire) { syncMsg("同步服务尚未配置完成", "err"); return; }
+    syncMsg("正在打开 Google 登录…");
+    window.LumenFire.login();
   });
-  document.getElementById("connectBtn").addEventListener("click", function () {
-    var url = document.getElementById("urlInput").value.trim().replace(/\/+$/, "");
-    var key = document.getElementById("keyInput").value.trim();
-    if (!url || !key) { syncMsg("请填写服务器地址和访问密码", "err"); return; }
-    if (!/^https?:\/\//.test(url)) url = "https://" + url;
-    sync.url = url; sync.key = key;
-    syncMsg("正在连接…（服务器休眠时唤醒约需 1 分钟，请耐心等待）");
-    apiReq("GET").then(function (res) {
-      if (res.status === 401) throw new Error("访问密码错误");
-      if (!res.ok) throw new Error("连接失败（HTTP " + res.status + "），检查地址是否正确");
-      saveSyncCfg();
-      syncMsg("连接成功！开始同步…", "ok");
-      pullCloud();
-      setTimeout(function () { syncDlg.close(); }, 900);
-    }).catch(function (err) {
-      syncMsg(err.message === "Failed to fetch" ? "连不上服务器，检查地址或稍等唤醒后重试" : (err.message || "连接失败"), "err");
-    });
+  document.getElementById("logoutBtn").addEventListener("click", function () {
+    if (window.LumenFire) window.LumenFire.logout();
+    syncMsg("已退出，数据仅保留在本设备", "ok");
   });
 
   /* ---------- init ---------- */
@@ -1572,22 +1659,19 @@
   }
 
   load();
-  loadSyncCfg();
   document.getElementById("sortSel").value = state.sort;
   var rolled = rollover();
   renderDateline();
   render();
   if (rolled > 0) showToast("有 " + rolled + " 条未完成任务已自动顺延到今天");
-  if (sync.url && sync.key) pullCloud();
-  else {
-    try {
-      // 从旧版 GitHub 直连同步升级过来的用户：提示重新配置，云端数据不受影响
-      if (localStorage.getItem("lumen-sync-v1")) {
-        setSyncStatus("err", "同步方式已升级，请重新配置");
-        showToast("云同步已升级为 Render 后端，点底部「☁ 云同步」重新连接即可，数据不会丢失");
-      }
-    } catch (e) { /* ignore */ }
-  }
+  try {
+    // 从旧版同步方式升级过来的用户提示一次
+    if (localStorage.getItem("lumen-sync-v1") || localStorage.getItem("lumen-sync-v2")) {
+      localStorage.removeItem("lumen-sync-v1");
+      localStorage.removeItem("lumen-sync-v2");
+      showToast("云同步已升级：点底部「☁ 云同步」用 Google 登录即可，数据不会丢失");
+    }
+  } catch (e) { /* ignore */ }
   sizeSky();
   if (reduceMotion) drawSky(1000);
   else requestAnimationFrame(skyLoop);
@@ -1609,13 +1693,71 @@
   }
   setInterval(checkDayChange, 60000);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) {
-      checkDayChange();
-      // 切回页面时拉一次云端最新数据（至少间隔 30 秒）
-      if (sync.url && sync.key && Date.now() - lastPullAt > 30000) pullCloud();
-    }
+    if (!document.hidden) checkDayChange();
+    // 云端同步是实时监听，切回页面时 SDK 会自动重连，无需手动拉取
   });
 })();
+</script>
+<script type="module">
+// ===== Firebase 云同步（Firestore 实时数据库 + Google 登录）=====
+// 填入 Firebase 控制台生成的 firebaseConfig 后自动启用；为 null 时应用以纯本地模式运行
+const FIREBASE_CONFIG = null;
+
+if (FIREBASE_CONFIG) {
+  try {
+    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+    const { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } =
+      await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
+    const { initializeFirestore, persistentLocalCache, doc, setDoc, onSnapshot } =
+      await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+
+    const app = initializeApp(FIREBASE_CONFIG);
+    const auth = getAuth(app);
+    let db;
+    try {
+      db = initializeFirestore(app, { localCache: persistentLocalCache() });
+    } catch (e) {
+      const { getFirestore } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+      db = getFirestore(app);
+    }
+
+    let unsub = null;
+    let ref = null;
+
+    window.LumenFire = {
+      user: null,
+      login() {
+        const provider = new GoogleAuthProvider();
+        signInWithPopup(auth, provider).catch(function () {
+          // 移动端浏览器弹窗可能被拦截，回退到整页跳转登录
+          signInWithRedirect(auth, provider);
+        });
+      },
+      logout() { signOut(auth); },
+      save(docData) {
+        return ref ? setDoc(ref, docData) : Promise.reject(new Error("not signed in"));
+      }
+    };
+
+    getRedirectResult(auth).catch(function () { /* 非跳转返回场景，忽略 */ });
+    onAuthStateChanged(auth, function (user) {
+      window.LumenFire.user = user;
+      if (unsub) { unsub(); unsub = null; ref = null; }
+      if (user) {
+        ref = doc(db, "users", user.uid, "lumen", "data");
+        unsub = onSnapshot(ref, function (snap) {
+          if (snap.metadata.hasPendingWrites) return; // 本地写入的回显，跳过
+          window.__lumenRemote(snap.exists() ? snap.data() : { tasks: [], deleted: {} });
+        }, function (err) {
+          window.__lumenSyncErr("同步失败：" + (err.code || "网络错误"));
+        });
+      }
+      window.__lumenAuth(user);
+    });
+  } catch (e) {
+    window.__lumenSyncErr("同步服务加载失败");
+  }
+}
 </script>
 </body>
 </html>
