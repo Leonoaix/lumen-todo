@@ -529,16 +529,14 @@
 
 <dialog class="backup" id="syncDlg">
   <h2>☁ 云同步设置</h2>
-  <p class="hint">用你自己的 GitHub 私有仓库存数据，电脑、手机配置同一枚令牌后即可共享同一份清单，改动自动双向合并。私有仓库 <b>lumen-todo-data</b> 已创建好，只差一枚访问令牌：</p>
+  <p class="hint">连接你部署在 Render 上的同步服务后，电脑、手机就共享同一份清单，改动自动双向合并。每台设备只需填一次下面两项：</p>
   <ol class="steps">
-    <li>打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a>（需登录 GitHub）</li>
-    <li>Token name 随便填，Expiration 建议选 1 年</li>
-    <li>Repository access 选 <b>Only select repositories</b>，勾选 <b>lumen-todo-data</b></li>
-    <li>Permissions → Repository permissions → <b>Contents</b> 设为 <b>Read and write</b></li>
-    <li>点 Generate token，复制以 <code>github_pat_</code> 开头的令牌粘贴到下面</li>
+    <li>服务器地址：Render 上部署好的服务网址，形如 <code>https://xxx.onrender.com</code></li>
+    <li>访问密码：部署时设置的 <code>ACCESS_KEY</code></li>
+    <li>提示：免费服务器闲置会休眠，首次同步可能需要约 1 分钟唤醒，之后就快了</li>
   </ol>
-  <div class="exrow"><span class="exlabel">令牌</span><input type="password" id="tokenInput" placeholder="github_pat_…" autocomplete="off"></div>
-  <div class="exrow"><span class="exlabel">仓库</span><input type="text" id="repoInput" value="lumen-todo-data" autocomplete="off"></div>
+  <div class="exrow"><span class="exlabel">服务器</span><input type="text" id="urlInput" placeholder="https://xxx.onrender.com" autocomplete="off"></div>
+  <div class="exrow"><span class="exlabel">密码</span><input type="password" id="keyInput" placeholder="部署时设置的 ACCESS_KEY" autocomplete="off"></div>
   <p class="hint" id="syncMsg"></p>
   <div class="dacts">
     <button class="btn" id="disconnectBtn">断开同步</button>
@@ -599,9 +597,9 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* ---------- cloud sync: GitHub 私有仓库作为数据后端 ---------- */
-  var SYNC_KEY = "lumen-sync-v1";
-  var sync = { token: "", owner: "", repo: "lumen-todo-data", sha: null };
+  /* ---------- cloud sync: 自建 Render 后端 API ---------- */
+  var SYNC_KEY = "lumen-sync-v2";
+  var sync = { url: "", key: "", rev: 0 };
   var pushTimer = null;
   var syncBusy = false;
   var lastPullAt = 0;
@@ -611,15 +609,14 @@
       var raw = localStorage.getItem(SYNC_KEY);
       if (raw) {
         var c = JSON.parse(raw);
-        sync.token = c.token || "";
-        sync.owner = c.owner || "";
-        sync.repo = c.repo || "lumen-todo-data";
+        sync.url = c.url || "";
+        sync.key = c.key || "";
       }
     } catch (e) { /* ignore */ }
   }
   function saveSyncCfg() {
     try {
-      localStorage.setItem(SYNC_KEY, JSON.stringify({ token: sync.token, owner: sync.owner, repo: sync.repo }));
+      localStorage.setItem(SYNC_KEY, JSON.stringify({ url: sync.url, key: sync.key }));
     } catch (e) { /* ignore */ }
   }
   function setSyncStatus(cls, text) {
@@ -627,19 +624,13 @@
     dot.className = "dot " + cls;
     document.getElementById("syncText").textContent = text;
   }
-  function ghReq(method, path, body) {
-    return fetch("https://api.github.com" + path, {
+  function apiReq(method, body) {
+    return fetch(sync.url + "/api/data", {
       method: method,
-      headers: {
-        "Authorization": "Bearer " + sync.token,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-      },
+      headers: { "Content-Type": "application/json", "X-Access-Key": sync.key },
       body: body ? JSON.stringify(body) : undefined
     });
   }
-  function b64enc(s) { return btoa(unescape(encodeURIComponent(s))); }
-  function b64dec(s) { return decodeURIComponent(escape(atob(s.replace(/\s/g, "")))); }
   function normalizeDoc(doc) {
     var ts = (doc.tasks || []).slice().sort(function (a, b) { return a.id < b.id ? -1 : 1; });
     var dl = {};
@@ -663,65 +654,56 @@
     });
   }
   function pullCloud() {
-    if (!sync.token || !sync.owner) return;
+    if (!sync.url || !sync.key) return;
     lastPullAt = Date.now();
-    setSyncStatus("busy", "同步中…");
-    ghReq("GET", "/repos/" + sync.owner + "/" + sync.repo + "/contents/data.json")
+    setSyncStatus("busy", "同步中…（服务器休眠时唤醒约需 1 分钟）");
+    apiReq("GET")
       .then(function (res) {
-        if (res.status === 404) { sync.sha = null; pushCloud(); return; }
+        if (res.status === 401) { setSyncStatus("err", "访问密码错误"); return; }
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json().then(function (j) {
-          sync.sha = j.sha;
-          var doc = JSON.parse(b64dec(j.content));
+          sync.rev = j.rev || 0;
+          var doc = j.doc || {};
           var before = normalizeDoc(doc);
           mergeDoc(doc);
           rollover();
           render();
           var after = normalizeDoc({ tasks: state.tasks, deleted: deleted });
           if (after !== before) schedulePush();
-          else setSyncStatus("ok", "已同步 · " + sync.owner + "/" + sync.repo);
+          else setSyncStatus("ok", "已同步");
         });
       })
-      .catch(function () { setSyncStatus("err", "同步失败，检查网络或令牌"); });
+      .catch(function () { setSyncStatus("err", "同步失败，稍后自动重试"); });
   }
   function pushCloud(retried) {
-    if (!sync.token || !sync.owner) return;
+    if (!sync.url || !sync.key) return;
     if (syncBusy) { schedulePush(); return; }
     syncBusy = true;
     setSyncStatus("busy", "同步中…");
-    var doc = { tasks: state.tasks, deleted: deleted, savedAt: Date.now() };
-    var body = { message: "sync " + new Date().toISOString(), content: b64enc(JSON.stringify(doc)) };
-    if (sync.sha) body.sha = sync.sha;
-    ghReq("PUT", "/repos/" + sync.owner + "/" + sync.repo + "/contents/data.json", body)
+    apiReq("PUT", { doc: { tasks: state.tasks, deleted: deleted }, baseRev: sync.rev })
       .then(function (res) {
         syncBusy = false;
-        if (res.status === 409 || res.status === 422) {
-          // 远端已被另一台设备更新：拉取合并后重推一次
-          if (!retried) {
-            ghReq("GET", "/repos/" + sync.owner + "/" + sync.repo + "/contents/data.json").then(function (r2) {
-              if (!r2.ok) throw new Error("HTTP " + r2.status);
-              return r2.json().then(function (j) {
-                sync.sha = j.sha;
-                mergeDoc(JSON.parse(b64dec(j.content)));
-                render();
-                pushCloud(true);
-              });
-            }).catch(function () { setSyncStatus("err", "同步冲突，稍后自动重试"); });
-          } else {
-            setSyncStatus("err", "同步冲突，稍后自动重试");
-          }
-          return;
+        if (res.status === 401) { setSyncStatus("err", "访问密码错误"); return; }
+        if (res.status === 409) {
+          // 远端已被另一台设备更新：合并后重推一次
+          return res.json().then(function (j) {
+            sync.rev = j.rev || 0;
+            mergeDoc(j.doc || {});
+            render();
+            if (!retried) pushCloud(true);
+            else setSyncStatus("err", "同步冲突，稍后自动重试");
+          });
         }
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json().then(function (j) {
-          sync.sha = j.content.sha;
-          setSyncStatus("ok", "已同步 · " + sync.owner + "/" + sync.repo);
+          sync.rev = j.rev || 0;
+          setSyncStatus("ok", "已同步");
         });
       })
-      .catch(function () { syncBusy = false; setSyncStatus("err", "同步失败，检查网络或令牌"); });
+      .catch(function () { syncBusy = false; setSyncStatus("err", "同步失败，稍后自动重试"); });
   }
   function schedulePush() {
-    if (!sync.token) return;
+    if (!sync.url || !sync.key) return;
     clearTimeout(pushTimer);
     pushTimer = setTimeout(function () { pushCloud(false); }, 1800);
   }
@@ -1458,46 +1440,34 @@
     m.className = "hint " + (cls || "");
   }
   document.getElementById("syncBtn").addEventListener("click", function () {
-    document.getElementById("tokenInput").value = sync.token;
-    document.getElementById("repoInput").value = sync.repo;
-    syncMsg(sync.token ? "当前已连接：" + sync.owner + "/" + sync.repo : "");
+    document.getElementById("urlInput").value = sync.url;
+    document.getElementById("keyInput").value = sync.key;
+    syncMsg(sync.url && sync.key ? "当前已连接：" + sync.url : "");
     syncDlg.showModal();
   });
   document.getElementById("closeSyncBtn").addEventListener("click", function () { syncDlg.close(); });
   document.getElementById("disconnectBtn").addEventListener("click", function () {
-    sync.token = ""; sync.owner = ""; sync.sha = null;
+    sync.url = ""; sync.key = ""; sync.rev = 0;
     saveSyncCfg();
     setSyncStatus("off", "本地模式 · 未开启云同步");
     syncMsg("已断开，数据仅保留在本设备", "ok");
   });
   document.getElementById("connectBtn").addEventListener("click", function () {
-    var token = document.getElementById("tokenInput").value.trim();
-    var repo = document.getElementById("repoInput").value.trim() || "lumen-todo-data";
-    if (!token) { syncMsg("请先粘贴访问令牌", "err"); return; }
-    sync.token = token; sync.repo = repo;
-    syncMsg("正在验证令牌…");
-    ghReq("GET", "/user").then(function (res) {
-      if (!res.ok) throw new Error("令牌无效（HTTP " + res.status + "）");
-      return res.json();
-    }).then(function (u) {
-      sync.owner = u.login;
-      return ghReq("GET", "/repos/" + sync.owner + "/" + sync.repo).then(function (res) {
-        if (res.status === 404) {
-          // 仓库不存在则尝试创建（经典令牌可用；细粒度令牌需仓库已存在）
-          return ghReq("POST", "/user/repos", { name: sync.repo, private: true, auto_init: true }).then(function (r2) {
-            if (!r2.ok) throw new Error("找不到仓库 " + sync.owner + "/" + sync.repo + "，且无法自动创建");
-          });
-        }
-        if (!res.ok) throw new Error("无法访问仓库（HTTP " + res.status + "），检查令牌是否勾选了该仓库的 Contents 读写权限");
-      });
-    }).then(function () {
+    var url = document.getElementById("urlInput").value.trim().replace(/\/+$/, "");
+    var key = document.getElementById("keyInput").value.trim();
+    if (!url || !key) { syncMsg("请填写服务器地址和访问密码", "err"); return; }
+    if (!/^https?:\/\//.test(url)) url = "https://" + url;
+    sync.url = url; sync.key = key;
+    syncMsg("正在连接…（服务器休眠时唤醒约需 1 分钟，请耐心等待）");
+    apiReq("GET").then(function (res) {
+      if (res.status === 401) throw new Error("访问密码错误");
+      if (!res.ok) throw new Error("连接失败（HTTP " + res.status + "），检查地址是否正确");
       saveSyncCfg();
       syncMsg("连接成功！开始同步…", "ok");
       pullCloud();
       setTimeout(function () { syncDlg.close(); }, 900);
     }).catch(function (err) {
-      sync.owner = "";
-      syncMsg(err.message || "连接失败", "err");
+      syncMsg(err.message === "Failed to fetch" ? "连不上服务器，检查地址或稍等唤醒后重试" : (err.message || "连接失败"), "err");
     });
   });
 
@@ -1518,7 +1488,16 @@
   renderDateline();
   render();
   if (rolled > 0) showToast("有 " + rolled + " 条未完成任务已自动顺延到今天");
-  if (sync.token && sync.owner) pullCloud();
+  if (sync.url && sync.key) pullCloud();
+  else {
+    try {
+      // 从旧版 GitHub 直连同步升级过来的用户：提示重新配置，云端数据不受影响
+      if (localStorage.getItem("lumen-sync-v1")) {
+        setSyncStatus("err", "同步方式已升级，请重新配置");
+        showToast("云同步已升级为 Render 后端，点底部「☁ 云同步」重新连接即可，数据不会丢失");
+      }
+    } catch (e) { /* ignore */ }
+  }
   sizeSky();
   if (reduceMotion) drawSky(1000);
   else requestAnimationFrame(skyLoop);
@@ -1543,7 +1522,7 @@
     if (!document.hidden) {
       checkDayChange();
       // 切回页面时拉一次云端最新数据（至少间隔 30 秒）
-      if (sync.token && sync.owner && Date.now() - lastPullAt > 30000) pullCloud();
+      if (sync.url && sync.key && Date.now() - lastPullAt > 30000) pullCloud();
     }
   });
 })();
