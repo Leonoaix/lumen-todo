@@ -203,6 +203,18 @@
   }
   .searchwrap input:focus { border-color: rgba(70, 232, 210, 0.45); box-shadow: var(--glow); }
   .searchwrap input::placeholder { color: var(--muted); }
+  .tagsuggest:empty { display: none; }
+  .tagsuggest .chip.on {
+    background: var(--teal-soft); color: var(--teal); border-color: transparent;
+    box-shadow: 0 0 12px rgba(70, 232, 210, 0.25);
+  }
+  #tagSuggest .chip { display: inline-flex; align-items: center; gap: 7px; }
+  #tagSuggest .chip > button {
+    background: none; border: none; color: inherit; font: inherit;
+    cursor: pointer; padding: 0;
+  }
+  #tagSuggest .tagx { opacity: 0.5; line-height: 1; }
+  #tagSuggest .tagx:hover { opacity: 1; color: var(--coral); }
   .tagrow { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
   .tagrow:empty { display: none; }
   .tagrow .chip.on { background: var(--teal-soft); color: var(--teal); border-color: transparent; box-shadow: 0 0 12px rgba(70, 232, 210, 0.25); }
@@ -475,6 +487,7 @@
         <span class="exlabel">标签</span>
         <input type="text" id="newTags" placeholder="用逗号分隔，如：工作, 健身" autocomplete="off">
       </div>
+      <div class="exrow tagsuggest" id="tagSuggest"></div>
       <div class="exrow">
         <span class="exlabel">备注</span>
         <input type="text" id="newNote" placeholder="补充细节（可选）" autocomplete="off" maxlength="500">
@@ -850,6 +863,10 @@
           chip("none", "无") + chip("low", "低") + chip("mid", "中") + chip("high", "高") + "</div>" +
         '<div class="exrow"><span class="exlabel">标签</span>' +
           '<input type="text" class="e-tags" value="' + esc((x.tags || []).join(", ")) + '" placeholder="用逗号分隔"></div>' +
+        '<div class="exrow tagsuggest">' + allTags().map(function (t) {
+          var on = (x.tags || []).indexOf(t) !== -1;
+          return '<button type="button" class="chip' + (on ? " on" : "") + '" data-etag="' + esc(t) + '">#' + esc(t) + "</button>";
+        }).join("") + "</div>" +
         '<div class="edacts">' +
           '<button type="button" class="btn" data-act="cancel">取消</button>' +
           '<button type="button" class="btn primary" data-act="save">保存</button>' +
@@ -926,6 +943,7 @@
     document.getElementById("emptyText").textContent = msg;
 
     renderTags();
+    renderTagSuggest();
     renderStats();
     save();
   }
@@ -967,6 +985,70 @@
   /* ---------- actions ---------- */
   function parseTags(s) {
     return s.split(/[,，、]/).map(function (t) { return t.trim(); }).filter(Boolean).slice(0, 10);
+  }
+  function allTags() {
+    // 历史标签按使用频率排序，作为候选
+    var counts = {};
+    state.tasks.forEach(function (x) {
+      (x.tags || []).forEach(function (t) { counts[t] = (counts[t] || 0) + 1; });
+    });
+    return Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+  }
+  function toggleTagStr(str, tag) {
+    var tags = parseTags(str);
+    var i = tags.indexOf(tag);
+    if (i === -1) tags.push(tag); else tags.splice(i, 1);
+    return tags.join(", ");
+  }
+  function renderTagSuggest() {
+    var box = document.getElementById("tagSuggest");
+    var tags = allTags();
+    box.innerHTML = "";
+    if (tags.length === 0) return;
+    var lab = document.createElement("span");
+    lab.className = "exlabel";
+    lab.textContent = "常用";
+    box.appendChild(lab);
+    var current = parseTags(document.getElementById("newTags").value);
+    tags.forEach(function (t) {
+      var chip = document.createElement("span");
+      chip.className = "chip" + (current.indexOf(t) !== -1 ? " on" : "");
+      var pick = document.createElement("button");
+      pick.type = "button";
+      pick.textContent = "#" + t;
+      pick.addEventListener("click", function () {
+        var inp = document.getElementById("newTags");
+        inp.value = toggleTagStr(inp.value, t);
+        renderTagSuggest();
+      });
+      var del = document.createElement("button");
+      del.type = "button";
+      del.className = "tagx";
+      del.textContent = "✕";
+      del.setAttribute("aria-label", "删除标签 " + t);
+      del.title = "删除这个标签";
+      del.addEventListener("click", function (e) {
+        e.stopPropagation();
+        removeTagEverywhere(t);
+      });
+      chip.appendChild(pick);
+      chip.appendChild(del);
+      box.appendChild(chip);
+    });
+  }
+  function removeTagEverywhere(t) {
+    var affected = state.tasks.filter(function (x) { return (x.tags || []).indexOf(t) !== -1; });
+    if (!confirm("删除标签「" + t + "」？它将从 " + affected.length + " 条任务中移除。")) return;
+    affected.forEach(function (x) {
+      x.tags = x.tags.filter(function (g) { return g !== t; });
+      x.updatedAt = Date.now();
+    });
+    if (state.tag === t) state.tag = null;
+    var inp = document.getElementById("newTags");
+    inp.value = parseTags(inp.value).filter(function (g) { return g !== t; }).join(", ");
+    render();
+    schedulePush();
+    showToast("已删除标签「" + t + "」");
   }
   function addTask() {
     var titleEl = document.getElementById("newTitle");
@@ -1310,6 +1392,7 @@
   document.getElementById("newDue").addEventListener("input", function () {
     document.querySelectorAll("#extra [data-quick]").forEach(function (x) { x.classList.remove("on"); });
   });
+  document.getElementById("newTags").addEventListener("input", renderTagSuggest);
   document.querySelectorAll("#extra [data-pri]").forEach(function (b) {
     b.addEventListener("click", function () {
       newPri = this.dataset.pri;
@@ -1345,6 +1428,8 @@
     if (!li) return;
     var actEl = e.target.closest("[data-act]");
     var act = actEl ? actEl.dataset.act : null;
+    var epriEl = e.target.closest("[data-epri]");
+    var etagEl = e.target.closest("[data-etag]");
     var id = li.dataset.id;
     if (act === "toggle") toggleDone(id, actEl);
     else if (act === "del") deleteTask(id);
@@ -1352,9 +1437,14 @@
     else if (act === "cancel") { editingId = null; render(); }
     else if (act === "save") saveEdit(li);
     else if (act === "cleardue") { var d = li.querySelector(".e-due"); if (d) d.value = ""; }
-    else if (actEl && actEl.dataset.epri !== undefined) {
+    else if (epriEl) {
       li.querySelectorAll("[data-epri]").forEach(function (x) { x.classList.remove("on"); });
-      actEl.classList.add("on");
+      epriEl.classList.add("on");
+    }
+    else if (etagEl) {
+      var inp = li.querySelector(".e-tags");
+      if (inp) inp.value = toggleTagStr(inp.value, etagEl.dataset.etag);
+      etagEl.classList.toggle("on");
     }
   }
   document.getElementById("list").addEventListener("click", listClickHandler);
